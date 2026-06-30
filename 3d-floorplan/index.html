@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Floorplan Viewer</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1e3a32; }
+        #info { 
+            position: absolute; 
+            top: 20px; 
+            width: 100%; 
+            text-align: center; 
+            color: white; 
+            pointer-events: none; 
+            text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
+            z-index: 10;
+        }
+        h1 { margin: 0; font-size: 24px; }
+        p { margin: 5px 0 0 0; font-size: 14px; color: #ccc; }
+        #controls-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 10px 14px;
+            border-radius: 6px;
+            font-size: 14px;
+            z-index: 15;
+            user-select: none;
+        }
+        #controls-panel label { cursor: pointer; display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+        #controls-panel button {
+            background: #f2c94c;
+            color: #1e3a32;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        #controls-panel button:hover { background: #f6d44a; }
+        #saveStatus { display: block; margin-top: 8px; font-size: 12px; color: #9fe0b0; min-height: 14px; }
+        #tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 14px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 20;
+            transform: translate(-50%, -100%);
+            margin-top: -10px;
+            white-space: nowrap;
+        }
+    </style>
+    <!-- Import Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+    <div id="info">
+        <h1>Event Floorplan 3D Preview</h1>
+        <p>Drag background to rotate | Scroll to zoom | <strong>Click + drag to move</strong> | <strong>Ctrl/Cmd+C then Ctrl/Cmd+V to duplicate</strong> | <strong>Shift + ←/→ to turn</strong> | Del to remove a copy</p>
+    </div>
+    <div id="controls-panel">
+        <label><input type="checkbox" id="moveCarpet"> Move carpet / floors</label>
+        <button id="resetLayout">Reset layout</button>
+        <span id="saveStatus"></span>
+    </div>
+    <div id="tooltip">Tooltip</div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { DragControls } from 'three/addons/controls/DragControls.js';
+
+        // 1. Scene Setup
+        const scene = new THREE.Scene();
+        // Brand "Dark Green" environment (Flavours of Tomorrow palette)
+        scene.background = new THREE.Color(0x1e3a32);
+        scene.fog = new THREE.Fog(0x1e3a32, 30, 110);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 25, 30);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0, 0);
+        controls.maxPolarAngle = Math.PI / 2 - 0.05; // Don't go below ground
+        controls.update();
+
+        // 2. Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(15, 30, 15);
+        dirLight.castShadow = true;
+        dirLight.shadow.camera.top = 20;
+        dirLight.shadow.camera.bottom = -20;
+        dirLight.shadow.camera.left = -20;
+        dirLight.shadow.camera.right = 20;
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        scene.add(dirLight);
+
+        // 3. Interactive Objects Array
+        const interactables = [];
+        const floorMeshes = [];
+
+        // Helper function to create objects
+        function createBox(width, height, depth, color, x, z, name, isFloor = false) {
+            const geometry = new THREE.BoxGeometry(width, height, depth);
+            const material = new THREE.MeshStandardMaterial({ 
+                color: color,
+                roughness: 0.7,
+                metalness: 0.1
+            });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(x, height / 2, z);
+            mesh.castShadow = !isFloor;
+            mesh.receiveShadow = true;
+            mesh.userData = { name: name, isFloor: isFloor };
+            scene.add(mesh);
+
+            interactables.push(mesh);
+            if (isFloor) floorMeshes.push(mesh);
+
+            // Add edges for better visibility
+            const edges = new THREE.EdgesGeometry(geometry);
+            const edgeOpacity = isFloor ? 0.4 : 0.2;
+            const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: edgeOpacity }));
+            mesh.add(line);
+
+            return mesh;
+        }
+
+        // 4. Build the Floorplan
+
+        // --- Floors ---
+        // Main Green Area (20m x 10m)
+        // Center is (0,0). X goes from -10 to 10. Z goes from -5 to 5.
+        createBox(20, 0.1, 10, 0x3e9b5b, 0, 0, "Main Hall (20m x 10m)", true);
+
+        // Brown Area (6m x 3m)
+        // Located at the bottom left. X from -10 to -4. Z from 5 to 8.
+        createBox(6, 0.1, 3, 0xc68a3e, -7, 6.5, "Cooking Demo Area (6m x 3m)", true);
+
+        // --- Left Section (8m x 10m) ---
+
+        // Entrance Arc (2.3m x 2m) - hollow, walk-through arch
+        (function createEntranceArch(cx, cz) {
+            const archMat = new THREE.MeshStandardMaterial({ color: 0x3e9b5b, roughness: 0.5, metalness: 0.25 });
+            const accentMat = new THREE.MeshStandardMaterial({ color: 0xf2c94c, roughness: 0.5, metalness: 0.25 });
+
+            const legHeight = 2.2;
+            const r = 1.1;      // half the walk-through span (~2.2m clear)
+            const tube = 0.13;  // post / arch thickness
+
+            // Invisible bounding box acts as the single draggable handle for the whole arch
+            const base = new THREE.Mesh(
+                new THREE.BoxGeometry(0.6, 3.2, 2.6),
+                new THREE.MeshBasicMaterial({ visible: false })
+            );
+            base.position.set(cx, 3.2 / 2, cz);
+            base.userData = { name: "Entrance Arc (walk-through)", isFloor: false };
+            scene.add(base);
+            interactables.push(base);
+
+            const addPart = (mesh, relY, relZ) => {
+                mesh.position.set(0, relY - 3.2 / 2, relZ);
+                mesh.castShadow = true;
+                mesh.userData = { name: "Entrance Arc (walk-through)" };
+                mesh.raycast = () => {}; // only the base handles picking, so the group drags together
+                base.add(mesh);
+            };
+
+            // Two vertical legs (you walk between them along X)
+            const legGeo = new THREE.CylinderGeometry(tube, tube, legHeight, 20);
+            addPart(new THREE.Mesh(legGeo, archMat), legHeight / 2, -r);
+            addPart(new THREE.Mesh(legGeo, archMat), legHeight / 2, r);
+
+            // Curved top connecting the legs (semicircle in the Z-Y plane)
+            const archGeo = new THREE.TorusGeometry(r, tube, 16, 60, Math.PI);
+            const archTop = new THREE.Mesh(archGeo, archMat);
+            archTop.rotation.y = Math.PI / 2;
+            addPart(archTop, legHeight, 0);
+
+            // Gold keystone accent at the apex (on-brand)
+            const keystone = new THREE.Mesh(new THREE.SphereGeometry(tube * 1.6, 16, 16), accentMat);
+            addPart(keystone, legHeight + r, 0);
+
+            return base;
+        })(-9.5, 0);
+
+        // Registration Booths (1.2m x 0.8m)
+        createBox(1.2, 1.2, 0.8, 0xffa500, -9, -3.5, "Registration Booth 2");
+        createBox(1.2, 1.2, 0.8, 0xffa500, -9, 3.5, "Registration Booth 1");
+
+        // Backdrop (approx 1m x 4m)
+        createBox(1, 2.5, 4, 0x111111, -6.5, 0, "Main Backdrop");
+
+        // Display Panels (1m x 2m)
+        createBox(1, 2, 2, 0x800080, -4.5, -3, "Display Panel (Top)");
+        createBox(1, 2, 2, 0x800080, -4.5, 3, "Display Panel (Bottom)");
+
+        // Laptop Stations & Demo Box (Center-Left)
+        createBox(1.2, 1, 0.8, 0x444444, -4.5, -1, "Laptop Station 1");
+        createBox(1.5, 1, 1, 0x000000, -4.5, 0, "Demonstration Box");
+        createBox(1.2, 1, 0.8, 0x444444, -4.5, 1, "Laptop Station 2");
+
+        // Goodie Redemption
+        createBox(1.2, 1, 0.8, 0xffa500, -3, -2, "Goodie Redemption 1");
+        createBox(1.2, 1, 0.8, 0xffa500, -3, 2, "Goodie Redemption 2");
+
+        // --- Right Section (12m x 10m) ---
+
+        // Retail Booths - Top Row (6 booths)
+        // X from -1 to 9. Spacing them out.
+        const startX = -1;
+        const spacingX = 1.9;
+        for(let i=0; i<6; i++) {
+            const bx = startX + i * spacingX;
+            // Table (1.5m x 0.7m)
+            createBox(1.5, 0.9, 0.7, 0xffaa00, bx, -3.8, `Retail Table Top ${i+1}`);
+        }
+
+        // Retail Booths - Bottom Row (6 booths)
+        for(let i=0; i<6; i++) {
+            const bx = startX + i * spacingX;
+            // Table (1.5m x 0.7m)
+            createBox(1.5, 0.9, 0.7, 0xffaa00, bx, 3.8, `Retail Table Bottom ${i+1}`);
+        }
+
+        // --- Brown Area (Bottom Left) ---
+
+        // Cooking Demo Backdrop
+        createBox(4, 2.5, 0.5, 0x111111, -7, 7.5, "Cooking Demo Backdrop");
+        // Cooking Demo Tables (2x 1.5m x 0.7m)
+        createBox(3, 1, 0.7, 0xffa500, -7, 6.5, "Cooking Demo Tables");
+        
+        // Redemption Booth 1 (in brown area)
+        createBox(2.4, 1, 0.8, 0xffa500, -9, 6.5, "Redemption Booth 1");
+
+        // --- Exit / Re-entry Point (gateway in the opening of the retail-end queue poles) ---
+        function makeSignTexture(line1, line2) {
+            const c = document.createElement('canvas');
+            c.width = 512; c.height = 256;
+            const ctx = c.getContext('2d');
+            ctx.fillStyle = '#1e3a32'; ctx.fillRect(0, 0, 512, 256);
+            ctx.strokeStyle = '#f2c94c'; ctx.lineWidth = 14; ctx.strokeRect(7, 7, 498, 242);
+            ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 78px Arial';
+            ctx.fillText(line1, 256, 92);
+            ctx.fillStyle = '#f2c94c'; ctx.font = 'bold 60px Arial';
+            ctx.fillText(line2, 256, 174);
+            return new THREE.CanvasTexture(c);
+        }
+
+        (function createExitGateway(cx, cz) {
+            const postMat = new THREE.MeshStandardMaterial({ color: 0xf2c94c, roughness: 0.4, metalness: 0.3 });
+            const beamMat = new THREE.MeshStandardMaterial({ color: 0x1e3a32, roughness: 0.6, metalness: 0.2 });
+
+            const baseH = 3.4;
+            const base = new THREE.Mesh(
+                new THREE.BoxGeometry(1.0, baseH, 2.2),
+                new THREE.MeshBasicMaterial({ visible: false })
+            );
+            base.position.set(cx, baseH / 2, cz);
+            base.userData = { name: "Exit / Re-entry Point", isFloor: false };
+            scene.add(base);
+            interactables.push(base);
+
+            const addPart = (mesh, relY, relZ) => {
+                mesh.position.set(0, relY - baseH / 2, relZ);
+                mesh.castShadow = true;
+                mesh.userData = { name: "Exit / Re-entry Point" };
+                mesh.raycast = () => {};
+                base.add(mesh);
+                return mesh;
+            };
+
+            // Two gold gateway posts framing the walk-through opening
+            const postGeo = new THREE.CylinderGeometry(0.09, 0.09, 2.4, 20);
+            addPart(new THREE.Mesh(postGeo, postMat), 1.2, -0.95);
+            addPart(new THREE.Mesh(postGeo, postMat), 1.2, 0.95);
+
+            // Top beam connecting the posts
+            addPart(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 2.1), beamMat), 2.45, 0);
+
+            // Double-sided signboard reading EXIT / RE-ENTRY (visible from both directions)
+            const signTex = makeSignTexture('EXIT', 'RE-ENTRY');
+            const sign = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.8, 0.9),
+                new THREE.MeshBasicMaterial({ map: signTex, side: THREE.DoubleSide })
+            );
+            sign.rotation.y = Math.PI / 2; // face along X (in/out of the venue)
+            addPart(sign, 2.95, 0);
+
+            return base;
+        })(10.3, 4.35);
+
+        // --- Queue Pole Barricades ---
+        // Builds a line of stanchion posts connected by belts between two points.
+        function createBarricadeLine(x1, z1, x2, z2, name, spacing = 1.2) {
+            const dx = x2 - x1;
+            const dz = z2 - z1;
+            const length = Math.sqrt(dx * dx + dz * dz);
+            const count = Math.max(2, Math.round(length / spacing));
+            const postHeight = 1.0;
+            const postGeo = new THREE.CylinderGeometry(0.04, 0.05, postHeight, 12);
+            const baseGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.06, 16);
+            const postMat = new THREE.MeshStandardMaterial({ color: 0xb0b0b8, roughness: 0.3, metalness: 0.9 });
+            const beltMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.6, metalness: 0.1 });
+
+            const points = [];
+            for (let i = 0; i <= count; i++) {
+                const t = i / count;
+                const px = x1 + dx * t;
+                const pz = z1 + dz * t;
+                points.push({ px, pz });
+
+                // Post
+                const post = new THREE.Mesh(postGeo, postMat);
+                post.position.set(px, postHeight / 2, pz);
+                post.castShadow = true;
+                scene.add(post);
+
+                // Base
+                const base = new THREE.Mesh(baseGeo, postMat);
+                base.position.set(px, 0.03, pz);
+                base.castShadow = true;
+                scene.add(base);
+            }
+
+            // Belts between consecutive posts
+            for (let i = 0; i < points.length - 1; i++) {
+                const a = points[i];
+                const b = points[i + 1];
+                const segLen = Math.sqrt((b.px - a.px) ** 2 + (b.pz - a.pz) ** 2);
+                const belt = new THREE.Mesh(
+                    new THREE.BoxGeometry(segLen, 0.05, 0.02),
+                    beltMat
+                );
+                belt.position.set((a.px + b.px) / 2, postHeight * 0.8, (a.pz + b.pz) / 2);
+                belt.rotation.y = -Math.atan2(b.pz - a.pz, b.px - a.px);
+                belt.castShadow = true;
+                scene.add(belt);
+            }
+        }
+
+        // Two longest (20m) sides of the event area - placed just outside the hall edges
+        createBarricadeLine(-10.3, -5.3, 10.3, -5.3, "Barricade - North Side");
+        createBarricadeLine(-10.3, 5.3, 10.3, 5.3, "Barricade - South Side");
+        // End of the retail zone (right edge) - stops short to leave an opening for the exit / re-entry point
+        createBarricadeLine(10.3, -5.3, 10.3, 3.4, "Barricade - Retail Zone End");
+
+        // 5. Raycaster for Tooltips
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        const tooltip = document.getElementById('tooltip');
+        let hoveredObject = null;
+        let originalColor = null;
+
+        // 5.5 Drag Controls
+        // Floors are excluded by default so clicking the carpet still rotates the camera.
+        const draggables = interactables.filter(o => !o.userData.isFloor);
+        const dragControls = new DragControls(draggables, camera, renderer.domElement);
+
+        // --- Status helper ---
+        const LAYOUT_KEY = 'fot_floorplan_layout_v2';
+        const saveStatusEl = document.getElementById('saveStatus');
+        let statusTimer = null;
+
+        function showStatus(msg) {
+            saveStatusEl.textContent = msg;
+            clearTimeout(statusTimer);
+            statusTimer = setTimeout(() => { saveStatusEl.textContent = ''; }, 2200);
+        }
+
+        const moveCarpetCheckbox = document.getElementById('moveCarpet');
+
+        // --- Selection ---
+        let selectedObject = null;
+        let selectionHelper = null;
+
+        function selectObject(obj) {
+            selectedObject = obj;
+            if (selectionHelper) { scene.remove(selectionHelper); selectionHelper = null; }
+            if (obj) {
+                selectionHelper = new THREE.BoxHelper(obj, 0xf2c94c);
+                if (selectionHelper.material) selectionHelper.material.depthTest = false;
+                scene.add(selectionHelper);
+                showStatus('Selected: ' + (obj.userData.name || 'object'));
+            }
+        }
+        function deselect() { selectObject(null); }
+
+        // --- Duplication (copy / paste) ---
+        let clipboard = null;
+        let copyCounter = 0;
+        const userAdded = []; // [{ templateName, name }]
+        const stripCopy = (n) => (n || 'object').replace(/ \(copy \d+\)$/, '');
+
+        function instantiateClone(template, newName) {
+            const clone = template.clone();
+            clone.userData = Object.assign({}, template.userData, { name: newName });
+            // Only the root handles picking, so the whole object drags/selects as one unit
+            clone.traverse(c => {
+                if (c !== clone) {
+                    c.raycast = () => {};
+                    if (c.userData) c.userData = Object.assign({}, c.userData, { name: newName });
+                }
+            });
+            scene.add(clone);
+            interactables.push(clone);
+            if (template.userData.isFloor) {
+                floorMeshes.push(clone);
+                if (moveCarpetCheckbox.checked) draggables.push(clone);
+            } else {
+                draggables.push(clone);
+            }
+            return clone;
+        }
+
+        function findTemplateByName(name) {
+            return interactables.find(o => o.userData && o.userData.name === name) || null;
+        }
+
+        function pasteObject() {
+            if (!clipboard) { showStatus('Nothing copied yet (select + Ctrl/Cmd+C)'); return; }
+            const baseName = stripCopy(clipboard.userData.name);
+            copyCounter++;
+            const newName = baseName + ' (copy ' + copyCounter + ')';
+            const clone = instantiateClone(clipboard, newName);
+            clone.position.copy(clipboard.position);
+            clone.position.x += 1;
+            clone.position.z += 1;
+            clone.rotation.y = clipboard.rotation.y;
+            userAdded.push({ templateName: baseName, name: newName });
+            selectObject(clone);
+            saveLayout();
+            showStatus('Pasted: ' + newName);
+        }
+
+        function deleteSelected() {
+            if (!selectedObject) return;
+            const name = selectedObject.userData.name || '';
+            if (!/\(copy \d+\)$/.test(name)) { showStatus('Only pasted copies can be deleted'); return; }
+            scene.remove(selectedObject);
+            [interactables, draggables, floorMeshes].forEach(arr => {
+                const i = arr.indexOf(selectedObject);
+                if (i >= 0) arr.splice(i, 1);
+            });
+            const ua = userAdded.findIndex(a => a.name === name);
+            if (ua >= 0) userAdded.splice(ua, 1);
+            deselect();
+            saveLayout();
+            showStatus('Deleted: ' + name);
+        }
+
+        // --- Layout persistence (positions + rotation + pasted copies) ---
+        function saveLayout() {
+            const positions = {};
+            interactables.forEach(o => {
+                if (o.userData && o.userData.name) {
+                    positions[o.userData.name] = {
+                        x: +o.position.x.toFixed(3),
+                        y: +o.position.y.toFixed(3),
+                        z: +o.position.z.toFixed(3),
+                        ry: +o.rotation.y.toFixed(4)
+                    };
+                }
+            });
+            try {
+                localStorage.setItem(LAYOUT_KEY, JSON.stringify({ positions, added: userAdded }));
+                showStatus('Layout saved');
+            } catch (e) {
+                showStatus('Could not save layout');
+            }
+        }
+
+        function loadLayout() {
+            let raw;
+            try { raw = localStorage.getItem(LAYOUT_KEY); } catch (e) { return; }
+            if (!raw) return;
+            let data;
+            try { data = JSON.parse(raw); } catch (e) { return; }
+
+            // 1. Recreate user-added (copied/pasted) objects from their templates
+            if (Array.isArray(data.added)) {
+                data.added.forEach(entry => {
+                    const template = findTemplateByName(entry.templateName);
+                    if (template) {
+                        instantiateClone(template, entry.name);
+                        userAdded.push({ templateName: entry.templateName, name: entry.name });
+                        const m = /\(copy (\d+)\)$/.exec(entry.name);
+                        if (m) copyCounter = Math.max(copyCounter, parseInt(m[1], 10));
+                    }
+                });
+            }
+
+            // 2. Apply saved transforms to everything (originals + recreated copies)
+            const positions = data.positions || {};
+            interactables.forEach(o => {
+                const saved = o.userData && o.userData.name && positions[o.userData.name];
+                if (saved) {
+                    o.position.set(saved.x, saved.y, saved.z);
+                    if (typeof saved.ry === 'number') o.rotation.y = saved.ry;
+                }
+            });
+            showStatus('Restored your saved layout');
+        }
+
+        // Reset to the default code-defined layout
+        document.getElementById('resetLayout').addEventListener('click', () => {
+            try { localStorage.removeItem(LAYOUT_KEY); } catch (e) {}
+            location.reload();
+        });
+
+        // Toggle whether carpet / floors can be dragged
+        moveCarpetCheckbox.addEventListener('change', (e) => {
+            if (e.target.checked) {
+                floorMeshes.forEach(f => { if (!draggables.includes(f)) draggables.push(f); });
+            } else {
+                for (let i = draggables.length - 1; i >= 0; i--) {
+                    if (draggables[i].userData.isFloor) draggables.splice(i, 1);
+                }
+            }
+        });
+
+        // Apply any previously saved layout on startup
+        loadLayout();
+        
+        // Disable orbit controls when dragging starts; select the grabbed object
+        dragControls.addEventListener('dragstart', function (event) {
+            controls.enabled = false;
+            selectObject(event.object);
+        });
+
+        // Re-enable orbit controls when dragging ends
+        dragControls.addEventListener('dragend', function (event) {
+            controls.enabled = true;
+            if (selectionHelper) selectionHelper.update();
+            // Persist the new layout so reloads / updates keep what the user moved
+            saveLayout();
+        });
+
+        // Restrict movement to X and Z axes (keep Y height constant)
+        dragControls.addEventListener('drag', function(event) {
+            // Keep the object at its original height (half of its height geometry)
+            if (event.object.geometry && event.object.geometry.parameters)
+                event.object.position.y = event.object.geometry.parameters.height / 2;
+            if (selectionHelper) selectionHelper.update();
+        });
+
+        window.addEventListener('mousemove', (event) => {
+            // Calculate mouse position in normalized device coordinates (-1 to +1)
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            // Update the picking ray with the camera and mouse position
+            raycaster.setFromCamera(mouse, camera);
+
+            // Calculate objects intersecting the picking ray
+            const intersects = raycaster.intersectObjects(interactables);
+
+            if (intersects.length > 0) {
+                const object = intersects[0].object;
+                
+                if (hoveredObject !== object) {
+                    // Restore previous object color
+                    if (hoveredObject) {
+                        hoveredObject.material.color.setHex(originalColor);
+                    }
+                    
+                    // Highlight new object
+                    hoveredObject = object;
+                    originalColor = hoveredObject.material.color.getHex();
+                    
+                    // Lighten the color for highlight
+                    const color = new THREE.Color(originalColor);
+                    color.lerp(new THREE.Color(0xffffff), 0.3);
+                    hoveredObject.material.color.set(color);
+                    
+                    // Update tooltip
+                    tooltip.innerHTML = object.userData.name;
+                    tooltip.style.opacity = 1;
+                }
+                
+                // Move tooltip
+                tooltip.style.left = event.clientX + 'px';
+                tooltip.style.top = event.clientY + 'px';
+                
+            } else {
+                if (hoveredObject) {
+                    hoveredObject.material.color.setHex(originalColor);
+                    hoveredObject = null;
+                }
+                tooltip.style.opacity = 0;
+            }
+        });
+
+        // Click empty space to deselect
+        renderer.domElement.addEventListener('pointerdown', (event) => {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            raycaster.setFromCamera(mouse, camera);
+            const hits = raycaster.intersectObjects(interactables, true);
+            if (hits.length === 0) deselect();
+        });
+
+        // Keyboard: copy / paste / rotate / delete the selected object
+        window.addEventListener('keydown', (e) => {
+            const tag = (e.target && e.target.tagName) || '';
+            if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+            const meta = e.ctrlKey || e.metaKey;
+
+            if (meta && (e.key === 'c' || e.key === 'C')) {
+                if (selectedObject) { clipboard = selectedObject; showStatus('Copied: ' + (selectedObject.userData.name || 'object')); }
+            } else if (meta && (e.key === 'v' || e.key === 'V')) {
+                e.preventDefault();
+                pasteObject();
+            } else if (e.shiftKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+                if (selectedObject) {
+                    e.preventDefault();
+                    const step = Math.PI / 12; // 15 degrees per press
+                    selectedObject.rotation.y += (e.key === 'ArrowLeft' ? step : -step);
+                    if (selectionHelper) selectionHelper.update();
+                    saveLayout();
+                    showStatus('Rotated to ' + Math.round(THREE.MathUtils.radToDeg(selectedObject.rotation.y) % 360) + '°');
+                }
+            } else if (e.key === 'Delete' || e.key === 'Backspace') {
+                if (selectedObject) { e.preventDefault(); deleteSelected(); }
+            }
+        });
+
+        // 6. Resize Handler
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }, false);
+
+        // 7. Animation Loop
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            if (selectionHelper) selectionHelper.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
