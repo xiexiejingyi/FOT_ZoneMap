@@ -76,6 +76,10 @@
         <p>Drag background to rotate | Scroll to zoom | <strong>Click + drag to move</strong> | <strong>Ctrl/Cmd+C then Ctrl/Cmd+V to duplicate</strong> | <strong>Shift + ←/→ to turn</strong> | <strong>Del to delete selected</strong></p>
     </div>
     <div id="controls-panel">
+        <div class="btn-row" style="margin-bottom:8px;">
+            <button id="ver1Btn">Version 1 · Original</button>
+            <button id="ver2Btn">Version 2 · +6 Panels</button>
+        </div>
         <label><input type="checkbox" id="moveCarpet"> Move carpet / floors</label>
         <div class="btn-row">
             <button id="deleteSelected">Delete selected</button>
@@ -336,6 +340,58 @@
             }
         })(entranceBoard);
 
+        // ---- Version 2 extras (shown only when Version 2 is selected) ----
+        // Version 1 = original layout (untouched). Version 2 adds 6 system panels in a
+        // T-shape opposite the digital panel, and swaps the 6m entrance board for a 3m one.
+        const version1Objects = [entranceBoard];   // 6m entrance board is V1-only
+        const version2Objects = [];                // populated below
+
+        (function buildVersion2() {
+            // 3m x 2m entrance board (replaces the 6m Main Backdrop when V2 is active),
+            // placed at the same spot / facing as the current 6m board.
+            const boardT = 0.2, boardH = 2, boardLenZ = 3;
+            const v2Board = createBox(boardT, boardH, boardLenZ, 0x1e3a32, -8.32, 0.401, "Entrance Board (3m, V2)");
+            v2Board.rotation.y = Math.PI;
+            version2Objects.push(v2Board);
+
+            // True-A1 posters (594 x 841mm) fitted to the 3m board: 4 across x 2 down = 8
+            const cols = 4, rows = 2, pw = 0.594, ph = 0.841, vGap = 0.05;
+            const backX = -boardT / 2 - 0.011;
+            const colStep = boardLenZ / cols;                 // 0.75
+            const totalH = rows * ph + (rows - 1) * vGap;
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const idx = r * cols + c + 1;
+                    const poster = new THREE.Mesh(
+                        new THREE.PlaneGeometry(pw, ph),
+                        new THREE.MeshBasicMaterial({ map: makePosterTexture(idx), side: THREE.DoubleSide })
+                    );
+                    poster.position.set(backX, totalH / 2 - ph / 2 - r * (ph + vGap), -boardLenZ / 2 + colStep / 2 + c * colStep);
+                    poster.rotation.y = -Math.PI / 2;
+                    poster.raycast = () => {};
+                    poster.userData = { name: "A1 Poster V2 " + idx };
+                    v2Board.add(poster);
+                }
+            }
+
+            // 6 system panels (1m x 2m) arranged in a T-shape on the bottom strip (z ~ +4),
+            // opposite the digital panel row (laptop stations + demo box sit at z ~ -4).
+            const panelColor = 0xdb5c63;
+            const x0 = -5.9;            // centred under the digital-panel row
+            const barZ = 4.3;          // horizontal bar of the T (near the bottom wall)
+            const barStep = 1.2;
+            for (let i = 0; i < 4; i++) {
+                const px = x0 + (i - 1.5) * barStep;         // -7.7, -6.5, -5.3, -4.1
+                version2Objects.push(createBox(1, 2, 0.12, panelColor, px, barZ, "System Panel " + (i + 1)));
+            }
+            // stem of the T: 2 panels pointing inward toward the digital panel
+            [3.0, 1.8].forEach((z, k) => {
+                const p = createBox(1, 2, 0.12, panelColor, x0, z, "System Panel " + (5 + k));
+                p.rotation.y = Math.PI / 2;                  // run along Z to form the stem
+                version2Objects.push(p);
+            });
+        })();
+
         // Display Panels (1m x 2m)
         createBox(1, 2, 2, 0xdb5c63, -4.5, -3, "Display Panel (Top)");
         createBox(1, 2, 2, 0xdb5c63, -4.5, 3, "Display Panel (Bottom)");
@@ -518,6 +574,7 @@
 
         // --- Status helper ---
         const LAYOUT_KEY = 'fot_floorplan_layout_v2';
+        const VERSION_KEY = 'fot_floorplan_version';
         const saveStatusEl = document.getElementById('saveStatus');
         let statusTimer = null;
 
@@ -765,8 +822,40 @@
             }
         });
 
+        // ---- Version switching (V1 original / V2 with 6 system panels + 3m board) ----
+        let currentVersion = 1;
+
+        // Show/hide an object and keep it in/out of the draggable set accordingly.
+        function setObjVisible(o, show) {
+            o.visible = show;
+            const di = draggables.indexOf(o);
+            if (show && di < 0) draggables.push(o);
+            else if (!show && di >= 0) draggables.splice(di, 1);
+        }
+
+        function applyVersion(v) {
+            currentVersion = (v === 2) ? 2 : 1;
+            const showV2 = currentVersion === 2;
+            version2Objects.forEach(o => setObjVisible(o, showV2));
+            version1Objects.forEach(o => setObjVisible(o, !showV2));
+            if (selectedObject && selectedObject.visible === false) deselect();
+            try { localStorage.setItem(VERSION_KEY, String(currentVersion)); } catch (e) {}
+            const b1 = document.getElementById('ver1Btn');
+            const b2 = document.getElementById('ver2Btn');
+            if (b1 && b2) { b1.style.opacity = showV2 ? '0.5' : '1'; b2.style.opacity = showV2 ? '1' : '0.5'; }
+            showStatus(showV2 ? 'Version 2 · +6 system panels, 3m entrance board' : 'Version 1 · original layout');
+        }
+
+        document.getElementById('ver1Btn').addEventListener('click', () => applyVersion(1));
+        document.getElementById('ver2Btn').addEventListener('click', () => applyVersion(2));
+
         // Apply layout on startup (local copy first, else committed layout.json)
         initLayout();
+
+        // Restore the last-viewed version (defaults to the original, Version 1)
+        let savedVersion = 1;
+        try { savedVersion = parseInt(localStorage.getItem(VERSION_KEY) || '1', 10) || 1; } catch (e) {}
+        applyVersion(savedVersion);
         
         // Disable orbit controls when dragging starts; select the grabbed object
         dragControls.addEventListener('dragstart', function (event) {
@@ -798,8 +887,8 @@
             // Update the picking ray with the camera and mouse position
             raycaster.setFromCamera(mouse, camera);
 
-            // Calculate objects intersecting the picking ray
-            const intersects = raycaster.intersectObjects(interactables);
+            // Calculate objects intersecting the picking ray (skip hidden version objects)
+            const intersects = raycaster.intersectObjects(interactables.filter(o => o.visible !== false));
 
             if (intersects.length > 0) {
                 const object = intersects[0].object;
@@ -842,7 +931,7 @@
             mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
             mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
             raycaster.setFromCamera(mouse, camera);
-            const hits = raycaster.intersectObjects(interactables, true);
+            const hits = raycaster.intersectObjects(interactables.filter(o => o.visible !== false), true);
             if (hits.length === 0) deselect();
         });
 
