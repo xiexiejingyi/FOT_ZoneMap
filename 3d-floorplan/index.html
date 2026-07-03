@@ -5,19 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>3D Floorplan Viewer</title>
     <style>
-        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #1e3a32; }
+        body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #dff1fb; }
         #info { 
             position: absolute; 
             top: 20px; 
             width: 100%; 
             text-align: center; 
-            color: white; 
+            color: #1e3a32; 
             pointer-events: none; 
-            text-shadow: 1px 1px 3px rgba(0,0,0,0.8);
+            text-shadow: 0 1px 2px rgba(255,255,255,0.6);
             z-index: 10;
         }
         h1 { margin: 0; font-size: 24px; }
-        p { margin: 5px 0 0 0; font-size: 14px; color: #ccc; }
+        p { margin: 5px 0 0 0; font-size: 14px; color: #2c5a4a; }
         #controls-panel {
             position: absolute;
             top: 20px;
@@ -42,6 +42,7 @@
             font-size: 13px;
         }
         #controls-panel button:hover { background: #f6d44a; }
+        #controls-panel .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
         #saveStatus { display: block; margin-top: 8px; font-size: 12px; color: #9fe0b0; min-height: 14px; }
         #tooltip {
             position: absolute;
@@ -72,11 +73,17 @@
 <body>
     <div id="info">
         <h1>Event Floorplan 3D Preview</h1>
-        <p>Drag background to rotate | Scroll to zoom | <strong>Click + drag to move</strong> | <strong>Ctrl/Cmd+C then Ctrl/Cmd+V to duplicate</strong> | <strong>Shift + ←/→ to turn</strong> | Del to remove a copy</p>
+        <p>Drag background to rotate | Scroll to zoom | <strong>Click + drag to move</strong> | <strong>Ctrl/Cmd+C then Ctrl/Cmd+V to duplicate</strong> | <strong>Shift + ←/→ to turn</strong> | <strong>Del to delete selected</strong></p>
     </div>
     <div id="controls-panel">
         <label><input type="checkbox" id="moveCarpet"> Move carpet / floors</label>
-        <button id="resetLayout">Reset layout</button>
+        <div class="btn-row">
+            <button id="deleteSelected">Delete selected</button>
+            <button id="exportLayout">Export layout.json</button>
+            <button id="importLayout">Import</button>
+            <button id="resetLayout">Reset</button>
+        </div>
+        <input type="file" id="importFile" accept="application/json,.json" style="display:none">
         <span id="saveStatus"></span>
     </div>
     <div id="tooltip">Tooltip</div>
@@ -88,9 +95,9 @@
 
         // 1. Scene Setup
         const scene = new THREE.Scene();
-        // Brand "Dark Green" environment (Flavours of Tomorrow palette)
-        scene.background = new THREE.Color(0x1e3a32);
-        scene.fog = new THREE.Fog(0x1e3a32, 30, 110);
+        // Bright daytime sky
+        scene.background = new THREE.Color(0xdff1fb);
+        scene.fog = new THREE.Fog(0xdff1fb, 80, 220);
 
         const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
         camera.position.set(0, 25, 30);
@@ -99,6 +106,8 @@
         renderer.setSize(window.innerWidth, window.innerHeight);
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.15;
         document.body.appendChild(renderer.domElement);
 
         const controls = new OrbitControls(camera, renderer.domElement);
@@ -106,12 +115,17 @@
         controls.maxPolarAngle = Math.PI / 2 - 0.05; // Don't go below ground
         controls.update();
 
-        // 2. Lighting
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        // 2. Lighting - bright daytime
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0xcfe3d0, 1.1);
+        hemiLight.position.set(0, 50, 0);
+        scene.add(hemiLight);
+
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.75);
         scene.add(ambientLight);
 
-        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-        dirLight.position.set(15, 30, 15);
+        // Main sun light
+        const dirLight = new THREE.DirectionalLight(0xfff7e6, 2.0);
+        dirLight.position.set(18, 34, 16);
         dirLight.castShadow = true;
         dirLight.shadow.camera.top = 20;
         dirLight.shadow.camera.bottom = -20;
@@ -119,7 +133,13 @@
         dirLight.shadow.camera.right = 20;
         dirLight.shadow.mapSize.width = 2048;
         dirLight.shadow.mapSize.height = 2048;
+        dirLight.shadow.bias = -0.0003;
         scene.add(dirLight);
+
+        // Soft fill light from the opposite side to lift shadows
+        const fillLight = new THREE.DirectionalLight(0xeaf2ff, 0.5);
+        fillLight.position.set(-16, 18, -14);
+        scene.add(fillLight);
 
         // 3. Interactive Objects Array
         const interactables = [];
@@ -165,70 +185,170 @@
 
         // --- Left Section (8m x 10m) ---
 
-        // Entrance Arc (2.3m x 2m) - hollow, walk-through arch
+        // Entrance Arch - branded photo-frame gateway: 2m (W) x 2.3m (H) x 0.3m (D)
         (function createEntranceArch(cx, cz) {
-            const archMat = new THREE.MeshStandardMaterial({ color: 0x3e9b5b, roughness: 0.5, metalness: 0.25 });
-            const accentMat = new THREE.MeshStandardMaterial({ color: 0xf2c94c, roughness: 0.5, metalness: 0.25 });
+            const frameW = 2.0;    // overall width (Z)
+            const frameH = 2.3;    // overall height (Y)
+            const frameD = 0.3;    // depth / thickness (X)
+            const colW = 0.5;      // side panel width (Z)
+            const headerH = 0.5;   // top logo banner height (Y)
+            const baseH = frameH + 0.2;
 
-            const legHeight = 2.2;
-            const r = 1.1;      // half the walk-through span (~2.2m clear)
-            const tube = 0.13;  // post / arch thickness
+            const rr = (ctx, x, y, w, h, r) => {
+                ctx.beginPath();
+                ctx.moveTo(x + r, y);
+                ctx.arcTo(x + w, y, x + w, y + h, r);
+                ctx.arcTo(x + w, y + h, x, y + h, r);
+                ctx.arcTo(x, y + h, x, y, r);
+                ctx.arcTo(x, y, x + w, y, r);
+                ctx.closePath();
+            };
 
-            // Invisible bounding box acts as the single draggable handle for the whole arch
+            // Side graphic panel textures (blue->green left, green right), on-brand
+            const makePanel = (kind) => {
+                const c = document.createElement('canvas'); c.width = 160; c.height = 700;
+                const ctx = c.getContext('2d');
+                const g = ctx.createLinearGradient(0, 0, 0, 700);
+                if (kind === 'left') { g.addColorStop(0, '#1f5f92'); g.addColorStop(0.55, '#2f8f6b'); g.addColorStop(1, '#3e9b5b'); }
+                else { g.addColorStop(0, '#2e8f5f'); g.addColorStop(1, '#3e9b5b'); }
+                ctx.fillStyle = g; ctx.fillRect(0, 0, 160, 700);
+                ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center';
+                if (kind === 'left') {
+                    ctx.font = 'bold 20px Arial'; ctx.fillText('ABOUT FESTIVAL', 80, 150);
+                    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+                    for (let i = 0; i < 8; i++) ctx.fillRect(26, 172 + i * 16, 108, 6);
+                    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px Arial'; ctx.fillText('TIME TABLE', 80, 360);
+                    ctx.textAlign = 'left'; ctx.font = 'bold 13px Arial';
+                    ctx.fillText('DAY 1', 26, 392); ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.strokeRect(26, 400, 108, 44);
+                    ctx.fillText('DAY 2', 26, 470); ctx.strokeRect(26, 478, 108, 44);
+                } else {
+                    ctx.font = 'bold 18px Arial'; ctx.fillText('ORGANISED BY', 80, 150);
+                    ctx.fillText('SPONSORS', 80, 340);
+                    ctx.font = 'bold 16px Arial'; ctx.fillText('PROGRAMMER', 80, 520); ctx.fillText('PARTNERS', 80, 542);
+                }
+                // brand stripes near the base
+                ctx.fillStyle = '#3e9b5b'; ctx.fillRect(0, 640, 160, 20);
+                ctx.fillStyle = '#f2c94c'; ctx.fillRect(0, 660, 160, 20);
+                ctx.fillStyle = '#db5c63'; ctx.fillRect(0, 680, 160, 20);
+                const t = new THREE.CanvasTexture(c); t.anisotropy = 4; return t;
+            };
+
+            // Top logo banner texture
+            const makeHeader = () => {
+                const c = document.createElement('canvas'); c.width = 680; c.height = 180;
+                const ctx = c.getContext('2d');
+                ctx.fillStyle = '#1e3a32'; ctx.fillRect(0, 0, 680, 180);
+                ctx.fillStyle = '#ffffff'; rr(ctx, 60, 16, 560, 150, 18); ctx.fill();
+                ctx.textAlign = 'center'; ctx.fillStyle = '#1e6b3a';
+                ctx.font = 'italic bold 40px Georgia'; ctx.fillText('Flavours of Tomorrow', 340, 62);
+                ctx.fillStyle = '#2f8f5a'; rr(ctx, 200, 92, 280, 58, 12); ctx.fill();
+                ctx.fillStyle = '#ffffff'; ctx.font = 'bold 30px Arial'; ctx.fillText('THE FUTURE PANTRY', 340, 130);
+                const t = new THREE.CanvasTexture(c); t.anisotropy = 4; return t;
+            };
+
+            const leftMat = new THREE.MeshStandardMaterial({ map: makePanel('left'), roughness: 0.7, metalness: 0.05 });
+            const rightMat = new THREE.MeshStandardMaterial({ map: makePanel('right'), roughness: 0.7, metalness: 0.05 });
+            const headerMat = new THREE.MeshStandardMaterial({ map: makeHeader(), roughness: 0.7, metalness: 0.05 });
+
+            // Invisible bounding box = single draggable handle for the whole frame
             const base = new THREE.Mesh(
-                new THREE.BoxGeometry(0.6, 3.2, 2.6),
+                new THREE.BoxGeometry(frameD + 0.1, baseH, frameW + 0.2),
                 new THREE.MeshBasicMaterial({ visible: false })
             );
-            base.position.set(cx, 3.2 / 2, cz);
+            base.position.set(cx, baseH / 2, cz);
             base.userData = { name: "Entrance Arc (walk-through)", isFloor: false };
             scene.add(base);
             interactables.push(base);
 
-            const addPart = (mesh, relY, relZ) => {
-                mesh.position.set(0, relY - 3.2 / 2, relZ);
+            const addPart = (mesh, worldY, relZ) => {
+                mesh.position.set(0, worldY - baseH / 2, relZ);
                 mesh.castShadow = true;
                 mesh.userData = { name: "Entrance Arc (walk-through)" };
-                mesh.raycast = () => {}; // only the base handles picking, so the group drags together
+                mesh.raycast = () => {};
                 base.add(mesh);
             };
 
-            // Two vertical legs (you walk between them along X)
-            const legGeo = new THREE.CylinderGeometry(tube, tube, legHeight, 20);
-            addPart(new THREE.Mesh(legGeo, archMat), legHeight / 2, -r);
-            addPart(new THREE.Mesh(legGeo, archMat), legHeight / 2, r);
+            // Two side graphic columns (you walk through the central opening)
+            const colGeo = new THREE.BoxGeometry(frameD, frameH, colW);
+            const colZ = frameW / 2 - colW / 2; // 0.75
+            addPart(new THREE.Mesh(colGeo, leftMat), frameH / 2, -colZ);
+            addPart(new THREE.Mesh(colGeo, rightMat), frameH / 2, colZ);
 
-            // Curved top connecting the legs (semicircle in the Z-Y plane)
-            const archGeo = new THREE.TorusGeometry(r, tube, 16, 60, Math.PI);
-            const archTop = new THREE.Mesh(archGeo, archMat);
-            archTop.rotation.y = Math.PI / 2;
-            addPart(archTop, legHeight, 0);
-
-            // Gold keystone accent at the apex (on-brand)
-            const keystone = new THREE.Mesh(new THREE.SphereGeometry(tube * 1.6, 16, 16), accentMat);
-            addPart(keystone, legHeight + r, 0);
+            // Top logo banner spanning the full width
+            const headerGeo = new THREE.BoxGeometry(frameD + 0.04, headerH, frameW);
+            addPart(new THREE.Mesh(headerGeo, headerMat), frameH - headerH / 2, 0);
 
             return base;
         })(-9.5, 0);
 
-        // Registration Booths (1.2m x 0.8m)
-        createBox(1.2, 1.2, 0.8, 0xffa500, -9, -3.5, "Registration Booth 2");
-        createBox(1.2, 1.2, 0.8, 0xffa500, -9, 3.5, "Registration Booth 1");
+        // Registration tables (1.2m wide x 0.8m deep, ~0.75m table height)
+        createBox(1.2, 0.75, 0.8, 0x0f8a80, -9, -3.5, "Registration Booth 2");
+        createBox(1.2, 0.75, 0.8, 0x0f8a80, -9, 3.5, "Registration Booth 1");
 
-        // Backdrop (approx 1m x 4m)
-        createBox(1, 2.5, 4, 0x111111, -6.5, 0, "Main Backdrop");
+        // Event backdrop (6m wide x 2m tall)
+        const entranceBoard = createBox(0.2, 2, 6, 0x1e3a32, -6.5, 0, "Main Backdrop");
+
+        // Simple printed-poster texture (A1 look)
+        function makePosterTexture(n) {
+            const c = document.createElement('canvas');
+            c.width = 400; c.height = 600;
+            const ctx = c.getContext('2d');
+            const headers = ['#3e9b5b', '#db5c63', '#f2c94c', '#c68a3e', '#1e3a32'];
+            const hc = headers[(n - 1) % headers.length];
+            ctx.fillStyle = '#f7f4ec'; ctx.fillRect(0, 0, 400, 600);
+            ctx.strokeStyle = '#cfcabb'; ctx.lineWidth = 6; ctx.strokeRect(3, 3, 394, 594);
+            ctx.fillStyle = hc; ctx.fillRect(24, 24, 352, 120);
+            ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.font = 'bold 46px Arial'; ctx.fillText('POSTER ' + n, 200, 84);
+            ctx.fillStyle = '#b9b4a4';
+            for (let i = 0; i < 6; i++) ctx.fillRect(40, 190 + i * 52, 320 - (i % 2) * 70, 20);
+            ctx.fillStyle = hc; ctx.font = 'bold 34px Arial';
+            ctx.fillText('A1 · 600 × 900mm', 200, 552);
+            return new THREE.CanvasTexture(c);
+        }
+
+        // Mount A1 posters (0.6 x 0.9m portrait) on the BACK face: 10 across x 2 down = 20
+        (function mountPosters(board) {
+            const cols = 10, rows = 2;
+            const pw = 0.6, ph = 0.9;
+            const boardW = 6, boardT = 0.2;
+            const vGap = 0.05;
+            const backX = -boardT / 2 - 0.011;      // just behind the back (-X) face, in board-local space
+            const colStep = boardW / cols;           // 0.6
+            const totalH = rows * ph + (rows - 1) * vGap;
+            for (let r = 0; r < rows; r++) {
+                for (let c = 0; c < cols; c++) {
+                    const idx = r * cols + c + 1;
+                    const poster = new THREE.Mesh(
+                        new THREE.PlaneGeometry(pw, ph),
+                        new THREE.MeshBasicMaterial({ map: makePosterTexture(idx), side: THREE.DoubleSide })
+                    );
+                    poster.position.set(
+                        backX,
+                        totalH / 2 - ph / 2 - r * (ph + vGap),
+                        -boardW / 2 + colStep / 2 + c * colStep
+                    );
+                    poster.rotation.y = -Math.PI / 2; // face outward from the back (-X)
+                    poster.raycast = () => {};         // board stays a single draggable unit
+                    poster.userData = { name: "A1 Poster " + idx };
+                    board.add(poster);
+                }
+            }
+        })(entranceBoard);
 
         // Display Panels (1m x 2m)
-        createBox(1, 2, 2, 0x800080, -4.5, -3, "Display Panel (Top)");
-        createBox(1, 2, 2, 0x800080, -4.5, 3, "Display Panel (Bottom)");
+        createBox(1, 2, 2, 0xdb5c63, -4.5, -3, "Display Panel (Top)");
+        createBox(1, 2, 2, 0xdb5c63, -4.5, 3, "Display Panel (Bottom)");
 
-        // Laptop Stations & Demo Box (Center-Left)
-        createBox(1.2, 1, 0.8, 0x444444, -4.5, -1, "Laptop Station 1");
-        createBox(1.5, 1, 1, 0x000000, -4.5, 0, "Demonstration Box");
-        createBox(1.2, 1, 0.8, 0x444444, -4.5, 1, "Laptop Station 2");
+        // Laptop station tables (1.2m x 0.8m) either side of the interactive monitor
+        createBox(1.2, 0.75, 0.8, 0x0f8a80, -4.5, -1, "Laptop Station 1");
+        // Interactive Panel / Monitor: 1.6m (H) x 1m (L) x 1m (B)
+        createBox(1, 1.6, 1, 0xf2c94c, -4.5, 0, "Demonstration Box");
+        createBox(1.2, 0.75, 0.8, 0x0f8a80, -4.5, 1, "Laptop Station 2");
 
         // Goodie Redemption
-        createBox(1.2, 1, 0.8, 0xffa500, -3, -2, "Goodie Redemption 1");
-        createBox(1.2, 1, 0.8, 0xffa500, -3, 2, "Goodie Redemption 2");
+        createBox(1.2, 1, 0.8, 0xc68a3e, -3, -2, "Goodie Redemption 1");
+        createBox(1.2, 1, 0.8, 0xc68a3e, -3, 2, "Goodie Redemption 2");
 
         // --- Right Section (12m x 10m) ---
 
@@ -238,28 +358,28 @@
         const spacingX = 1.9;
         for(let i=0; i<6; i++) {
             const bx = startX + i * spacingX;
-            // Table (1.5m x 0.7m)
-            createBox(1.5, 0.9, 0.7, 0xffaa00, bx, -3.8, `Retail Table Top ${i+1}`);
+            // Booth table (1.5m x 0.7m)
+            createBox(1.5, 0.75, 0.7, 0xf2c94c, bx, -3.8, `Retail Table Top ${i+1}`);
         }
 
         // Retail Booths - Bottom Row (6 booths)
         for(let i=0; i<6; i++) {
             const bx = startX + i * spacingX;
-            // Table (1.5m x 0.7m)
-            createBox(1.5, 0.9, 0.7, 0xffaa00, bx, 3.8, `Retail Table Bottom ${i+1}`);
+            // Booth table (1.5m x 0.7m)
+            createBox(1.5, 0.75, 0.7, 0xf2c94c, bx, 3.8, `Retail Table Bottom ${i+1}`);
         }
 
         // --- Brown Area (Bottom Left) ---
 
-        // Cooking Demo Backdrop
-        createBox(4, 2.5, 0.5, 0x111111, -7, 7.5, "Cooking Demo Backdrop");
+        // Stage backdrop (6m wide x 2m tall)
+        createBox(6, 2, 0.5, 0x1e3a32, -7, 7.5, "Cooking Demo Backdrop");
         // Cooking Demo Tables (2x 1.5m x 0.7m)
-        createBox(3, 1, 0.7, 0xffa500, -7, 6.5, "Cooking Demo Tables");
+        createBox(3, 1, 0.7, 0xc68a3e, -7, 6.5, "Cooking Demo Tables");
         
         // Redemption Booth 1 (in brown area)
-        createBox(2.4, 1, 0.8, 0xffa500, -9, 6.5, "Redemption Booth 1");
+        createBox(2.4, 1, 0.8, 0xdb5c63, -9, 6.5, "Redemption Booth 1");
 
-        // --- Exit / Re-entry Point (gateway in the opening of the retail-end queue poles) ---
+        // --- Exit / Re-entry Point (freestanding signboard - cheaper than a gateway arch) ---
         function makeSignTexture(line1, line2) {
             const c = document.createElement('canvas');
             c.width = 512; c.height = 256;
@@ -274,13 +394,12 @@
             return new THREE.CanvasTexture(c);
         }
 
-        (function createExitGateway(cx, cz) {
-            const postMat = new THREE.MeshStandardMaterial({ color: 0xf2c94c, roughness: 0.4, metalness: 0.3 });
-            const beamMat = new THREE.MeshStandardMaterial({ color: 0x1e3a32, roughness: 0.6, metalness: 0.2 });
+        (function createExitSign(cx, cz) {
+            const standMat = new THREE.MeshStandardMaterial({ color: 0xb0b0b8, roughness: 0.4, metalness: 0.8 });
 
-            const baseH = 3.4;
+            const baseH = 2.4;
             const base = new THREE.Mesh(
-                new THREE.BoxGeometry(1.0, baseH, 2.2),
+                new THREE.BoxGeometry(0.6, baseH, 1.5),
                 new THREE.MeshBasicMaterial({ visible: false })
             );
             base.position.set(cx, baseH / 2, cz);
@@ -297,73 +416,86 @@
                 return mesh;
             };
 
-            // Two gold gateway posts framing the walk-through opening
-            const postGeo = new THREE.CylinderGeometry(0.09, 0.09, 2.4, 20);
-            addPart(new THREE.Mesh(postGeo, postMat), 1.2, -0.95);
-            addPart(new THREE.Mesh(postGeo, postMat), 1.2, 0.95);
-
-            // Top beam connecting the posts
-            addPart(new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 2.1), beamMat), 2.45, 0);
+            // Single support pole + weighted base foot
+            addPart(new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.5, 16), standMat), 0.75, 0);
+            addPart(new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 0.06, 20), standMat), 0.03, 0);
 
             // Double-sided signboard reading EXIT / RE-ENTRY (visible from both directions)
             const signTex = makeSignTexture('EXIT', 'RE-ENTRY');
             const sign = new THREE.Mesh(
-                new THREE.PlaneGeometry(1.8, 0.9),
+                new THREE.PlaneGeometry(1.4, 0.8),
                 new THREE.MeshBasicMaterial({ map: signTex, side: THREE.DoubleSide })
             );
             sign.rotation.y = Math.PI / 2; // face along X (in/out of the venue)
-            addPart(sign, 2.95, 0);
+            addPart(sign, 1.9, 0);
 
             return base;
         })(10.3, 4.35);
 
         // --- Queue Pole Barricades ---
-        // Builds a line of stanchion posts connected by belts between two points.
+        // Each stanchion is its own separate draggable / rotatable / copyable unit
+        // (post + foot + the belt that reaches to the next pole), for full customisability.
+        const barricadePostGeo = new THREE.CylinderGeometry(0.04, 0.05, 1.0, 12);
+        const barricadeFootGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.06, 16);
+        const barricadePostMat = new THREE.MeshStandardMaterial({ color: 0xb0b0b8, roughness: 0.3, metalness: 0.9 });
+        const barricadeBeltMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.6, metalness: 0.1 });
+        const POST_H = 1.0;
+
+        // Create a single free-standing queue pole. If a belt vector is given, a belt
+        // segment reaches from this pole toward the next one.
+        function createQueuePole(px, pz, name, beltDX = 0, beltDZ = 0) {
+            const baseH = POST_H;
+            const handle = new THREE.Mesh(
+                new THREE.BoxGeometry(0.45, baseH, 0.45),
+                new THREE.MeshBasicMaterial({ visible: false })
+            );
+            handle.position.set(px, baseH / 2, pz);
+            handle.userData = { name: name, isFloor: false };
+            scene.add(handle);
+            interactables.push(handle);
+
+            const addChild = (mesh) => {
+                mesh.userData = { name: name };
+                mesh.raycast = () => {};
+                mesh.castShadow = true;
+                handle.add(mesh);
+            };
+
+            const post = new THREE.Mesh(barricadePostGeo, barricadePostMat);
+            post.position.set(0, 0, 0);
+            addChild(post);
+
+            const foot = new THREE.Mesh(barricadeFootGeo, barricadePostMat);
+            foot.position.set(0, 0.03 - baseH / 2, 0);
+            addChild(foot);
+
+            const segLen = Math.sqrt(beltDX * beltDX + beltDZ * beltDZ);
+            if (segLen > 0.001) {
+                const belt = new THREE.Mesh(new THREE.BoxGeometry(segLen, 0.05, 0.02), barricadeBeltMat);
+                belt.position.set(beltDX / 2, POST_H * 0.8 - baseH / 2, beltDZ / 2);
+                belt.rotation.y = -Math.atan2(beltDZ, beltDX);
+                addChild(belt);
+            }
+            return handle;
+        }
+
+        // Lay out a run of separate poles between two points.
         function createBarricadeLine(x1, z1, x2, z2, name, spacing = 1.2) {
             const dx = x2 - x1;
             const dz = z2 - z1;
             const length = Math.sqrt(dx * dx + dz * dz);
             const count = Math.max(2, Math.round(length / spacing));
-            const postHeight = 1.0;
-            const postGeo = new THREE.CylinderGeometry(0.04, 0.05, postHeight, 12);
-            const baseGeo = new THREE.CylinderGeometry(0.18, 0.18, 0.06, 16);
-            const postMat = new THREE.MeshStandardMaterial({ color: 0xb0b0b8, roughness: 0.3, metalness: 0.9 });
-            const beltMat = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.6, metalness: 0.1 });
-
-            const points = [];
+            const pts = [];
             for (let i = 0; i <= count; i++) {
                 const t = i / count;
-                const px = x1 + dx * t;
-                const pz = z1 + dz * t;
-                points.push({ px, pz });
-
-                // Post
-                const post = new THREE.Mesh(postGeo, postMat);
-                post.position.set(px, postHeight / 2, pz);
-                post.castShadow = true;
-                scene.add(post);
-
-                // Base
-                const base = new THREE.Mesh(baseGeo, postMat);
-                base.position.set(px, 0.03, pz);
-                base.castShadow = true;
-                scene.add(base);
+                pts.push({ x: x1 + dx * t, z: z1 + dz * t });
             }
-
-            // Belts between consecutive posts
-            for (let i = 0; i < points.length - 1; i++) {
-                const a = points[i];
-                const b = points[i + 1];
-                const segLen = Math.sqrt((b.px - a.px) ** 2 + (b.pz - a.pz) ** 2);
-                const belt = new THREE.Mesh(
-                    new THREE.BoxGeometry(segLen, 0.05, 0.02),
-                    beltMat
-                );
-                belt.position.set((a.px + b.px) / 2, postHeight * 0.8, (a.pz + b.pz) / 2);
-                belt.rotation.y = -Math.atan2(b.pz - a.pz, b.px - a.px);
-                belt.castShadow = true;
-                scene.add(belt);
-            }
+            pts.forEach((p, i) => {
+                const next = pts[i + 1];
+                const bdx = next ? next.x - p.x : 0;
+                const bdz = next ? next.z - p.z : 0;
+                createQueuePole(p.x, p.z, `${name} #${i + 1}`, bdx, bdz);
+            });
         }
 
         // Two longest (20m) sides of the event area - placed just outside the hall edges
@@ -460,24 +592,38 @@
             showStatus('Pasted: ' + newName);
         }
 
-        function deleteSelected() {
-            if (!selectedObject) return;
-            const name = selectedObject.userData.name || '';
-            if (!/\(copy \d+\)$/.test(name)) { showStatus('Only pasted copies can be deleted'); return; }
-            scene.remove(selectedObject);
+        // Names of default (code-defined) elements the user has deleted, so they
+        // stay deleted after reload.
+        const deletedNames = new Set();
+
+        function removeObjectFromScene(obj) {
+            scene.remove(obj);
             [interactables, draggables, floorMeshes].forEach(arr => {
-                const i = arr.indexOf(selectedObject);
+                const i = arr.indexOf(obj);
                 if (i >= 0) arr.splice(i, 1);
             });
-            const ua = userAdded.findIndex(a => a.name === name);
-            if (ua >= 0) userAdded.splice(ua, 1);
+        }
+
+        function deleteSelected() {
+            if (!selectedObject) { showStatus('Select an element first, then Delete'); return; }
+            const obj = selectedObject;
+            const name = obj.userData.name || '';
+            const isCopy = /\(copy \d+\)$/.test(name);
+            removeObjectFromScene(obj);
+            if (isCopy) {
+                const ua = userAdded.findIndex(a => a.name === name);
+                if (ua >= 0) userAdded.splice(ua, 1);
+            } else if (name) {
+                deletedNames.add(name); // remember so it stays gone on reload
+            }
             deselect();
             saveLayout();
             showStatus('Deleted: ' + name);
         }
 
         // --- Layout persistence (positions + rotation + pasted copies) ---
-        function saveLayout() {
+        // Build a serialisable snapshot of the current scene state.
+        function buildState() {
             const positions = {};
             interactables.forEach(o => {
                 if (o.userData && o.userData.name) {
@@ -489,21 +635,22 @@
                     };
                 }
             });
+            return { positions, added: userAdded, deleted: Array.from(deletedNames) };
+        }
+
+        // Persist to this browser's localStorage (local working copy).
+        function saveLayout() {
             try {
-                localStorage.setItem(LAYOUT_KEY, JSON.stringify({ positions, added: userAdded }));
+                localStorage.setItem(LAYOUT_KEY, JSON.stringify(buildState()));
                 showStatus('Layout saved');
             } catch (e) {
                 showStatus('Could not save layout');
             }
         }
 
-        function loadLayout() {
-            let raw;
-            try { raw = localStorage.getItem(LAYOUT_KEY); } catch (e) { return; }
-            if (!raw) return;
-            let data;
-            try { data = JSON.parse(raw); } catch (e) { return; }
-
+        // Apply a state snapshot onto the (default) scene.
+        function applyState(data) {
+            if (!data) return;
             // 1. Recreate user-added (copied/pasted) objects from their templates
             if (Array.isArray(data.added)) {
                 data.added.forEach(entry => {
@@ -516,20 +663,92 @@
                     }
                 });
             }
-
-            // 2. Apply saved transforms to everything (originals + recreated copies)
+            // 2. Apply saved transforms to everything (originals + recreated copies).
+            //    Y is derived from current geometry so resized elements always sit on the floor.
             const positions = data.positions || {};
             interactables.forEach(o => {
                 const saved = o.userData && o.userData.name && positions[o.userData.name];
                 if (saved) {
-                    o.position.set(saved.x, saved.y, saved.z);
+                    const y = (o.geometry && o.geometry.parameters && typeof o.geometry.parameters.height === 'number')
+                        ? o.geometry.parameters.height / 2
+                        : saved.y;
+                    o.position.set(saved.x, y, saved.z);
                     if (typeof saved.ry === 'number') o.rotation.y = saved.ry;
                 }
             });
-            showStatus('Restored your saved layout');
+
+            // 3. Remove any elements the user previously deleted
+            if (Array.isArray(data.deleted)) {
+                data.deleted.forEach(n => deletedNames.add(n));
+                interactables.slice().forEach(o => {
+                    if (o.userData && deletedNames.has(o.userData.name)) removeObjectFromScene(o);
+                });
+            }
         }
 
-        // Reset to the default code-defined layout
+        // Startup: prefer this browser's local edits; otherwise load the project's
+        // committed layout.json (so the layout travels with the GitHub repo).
+        async function initLayout() {
+            let raw = null;
+            try { raw = localStorage.getItem(LAYOUT_KEY); } catch (e) {}
+            if (raw) {
+                try { applyState(JSON.parse(raw)); showStatus('Restored your local layout'); return; }
+                catch (e) {}
+            }
+            // No local copy -> try the committed layout.json next to this file
+            try {
+                const res = await fetch('layout.json', { cache: 'no-store' });
+                if (res.ok) {
+                    const data = await res.json();
+                    applyState(data);
+                    showStatus('Loaded layout.json from project');
+                    return;
+                }
+            } catch (e) {
+                // fetch can be blocked on file:// — that's fine, fall back to defaults
+            }
+            showStatus('Using default layout');
+        }
+
+        // Export current layout as a downloadable layout.json (commit this to GitHub)
+        function exportLayout() {
+            const blob = new Blob([JSON.stringify(buildState(), null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'layout.json';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            showStatus('Exported layout.json — commit it to your repo');
+        }
+
+        document.getElementById('deleteSelected').addEventListener('click', deleteSelected);
+        document.getElementById('exportLayout').addEventListener('click', exportLayout);
+
+        // Import a layout.json: store it locally then reload so it applies cleanly
+        const importFileInput = document.getElementById('importFile');
+        document.getElementById('importLayout').addEventListener('click', () => importFileInput.click());
+        importFileInput.addEventListener('change', (e) => {
+            const file = e.target.files && e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    const data = JSON.parse(reader.result);
+                    localStorage.setItem(LAYOUT_KEY, JSON.stringify(data));
+                    showStatus('Imported — reloading…');
+                    setTimeout(() => location.reload(), 300);
+                } catch (err) {
+                    showStatus('Import failed: invalid JSON');
+                }
+            };
+            reader.readAsText(file);
+            importFileInput.value = '';
+        });
+
+        // Reset to the default code-defined layout (clears local copy)
         document.getElementById('resetLayout').addEventListener('click', () => {
             try { localStorage.removeItem(LAYOUT_KEY); } catch (e) {}
             location.reload();
@@ -546,8 +765,8 @@
             }
         });
 
-        // Apply any previously saved layout on startup
-        loadLayout();
+        // Apply layout on startup (local copy first, else committed layout.json)
+        initLayout();
         
         // Disable orbit controls when dragging starts; select the grabbed object
         dragControls.addEventListener('dragstart', function (event) {
